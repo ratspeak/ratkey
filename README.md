@@ -63,10 +63,10 @@ Controls whether you physically tap the YubiKey for each operation.
 | Policy | Behavior |
 |--------|----------|
 | `never` | No touch required. Operations happen automatically when plugged in. Good for messaging, servers, and unattended nodes. |
-| `cached` | Touch once, then no touch for 15 seconds (hardcoded by YubiKey, not configurable). Good if you send in bursts. |
+| `cached` | Touch once, then no touch for 15 seconds (not configurable). More secure, more hassle. |
 | `always` | Touch for every single operation. Maximum security, but expect frequent tapping. **NOT RECOMMENDED** |
 
-Touch is set separately for signing (slot 9A) and encryption (slot 9D). Both default to `cached`.
+Touch is set separately for signing (slot 9A) and encryption (slot 9D). Both default to `never`.
 
 When touch is enabled, the YubiKey's LED blinks to signal it's waiting. You tap, the operation proceeds.
 

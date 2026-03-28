@@ -32,10 +32,10 @@ def cli():
 @click.option("--method", type=click.Choice(["hardware-only", "recoverable"]),
               help="Provisioning method (prompted if not provided)")
 @click.option("--touch-signing", type=click.Choice(["never", "cached", "always"]),
-              default="cached", show_default=True,
+              default="never", show_default=True,
               help="Touch policy for signing operations")
 @click.option("--touch-encryption", type=click.Choice(["never", "cached", "always"]),
-              default="cached", show_default=True,
+              default="never", show_default=True,
               help="Touch policy for decryption operations")
 @click.option("--nickname", "-n", default="", help="Human-readable name for this identity")
 @click.option("--output", "-o", type=click.Path(), required=True,
