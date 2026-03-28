@@ -42,13 +42,13 @@ rnid-hw provision
 
 You pick a PIN (6-8 characters, 3 wrong attempts locks it) and choose one of the following two provisioning methods:
 
-1. **Hardware-only** generates keys directly on the YubiKey's secure element. No backup exists, nor are they possible. The private keys never exist outside the hardware, not even for a moment. Lose the YubiKey, lose the identity forever.
+1. `Hardware-only` generates keys directly on the YubiKey's secure element. No backup exists, nor are they possible. The private keys never exist outside the hardware, not even for a moment. Lose the YubiKey, lose the identity forever.
 
-2. **Recoverable** derives keys from a 24-word BIP-39 seed phrase and imports them to the YubiKey. Same concept as a Trezor or Ledger recovery phrase -- you write the words on paper, and that paper is your backup. If you lose the YubiKey, run `rnid-hw restore` with your seed phrase onto a new one.
+2. `Recoverable` derives keys from a 24-word BIP-39 seed phrase and imports them to the YubiKey. Same concept as a Trezor or Ledger recovery phrase -- you write the words on paper, and that paper is your backup. If you lose the YubiKey, run `rnid-hw restore` with your seed phrase onto a new one.
 
 The trade-off: the seed phrase is a second attack surface. Anyone who sees those 24 words can reconstruct your private keys. The seed phrase is not protected by your YubiKey PIN. The keys also briefly exist in host memory during first creation.
 
-We do not recommend one over the other - though **recoverable** is much less prone to human and hardware error.
+We do not recommend one over the other - though `recoverable` is much less prone to human and hardware error.
 
 ## Policies -- READ BEFORE PROVISIONING
 
