@@ -1,0 +1,1 @@
+These are Yubico's public root CA certificates for verifying YubiKey PIV attestation. They prove a key was generated on a genuine YubiKey. Downloaded from [Yubico's PIV attestation docs](https://developers.yubico.com/PIV/Introduction/PIV_attestation.html). Bundled here so they're never fetched from the network at runtime.

@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ratkey"
+version = "0.1.0"
+description = "Hardware-backed identity protection for Reticulum using YubiKey and Nitrokey PIV"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [{name = "Ratspeak Project", email = "dev@ratspeak.org"}]
+keywords = [
+    "reticulum", "mesh", "identity", "yubikey", "nitrokey",
+    "hardware-security", "piv", "ed25519", "x25519", "lxmf",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Communications",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "rns>=0.7.0",
+    "click>=8.0",
+    "tomli>=1.0;python_version<'3.11'",
+    "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+yubikey = ["yubikey-manager>=5.4"]
+nitrokey = ["pynitrokey>=0.4"]
+backup = ["argon2-cffi>=21.0", "cryptography>=3.4.7", "mnemonic>=0.20"]
+all = ["ratkey[yubikey,nitrokey,backup]"]
+
+[project.scripts]
+rnid-hw = "ratkey.cli.main:cli"
+
+[project.urls]
+Homepage = "https://ratspeak.org"
+Documentation = "https://ratspeak.org/docs/ratkey"
+Repository = "https://github.com/ratspeak/ratkey"
+Issues = "https://github.com/ratspeak/ratkey/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
