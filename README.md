@@ -7,9 +7,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-3776AB.svg)](https://python.org)
 [![YubiKey 5](https://img.shields.io/badge/YubiKey_5-fw_5.7%2B-84BD00.svg)](https://www.yubico.com/products/yubikey-5-overview/)
-[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/ratspeak/ratkey/issues)
+[![Status: Beta](https://img.shields.io/badge/status-beta-orange.svg)](https://github.com/ratspeak/ratkey/issues)
 
-> **NOTE:** YubiKey integration was written against the official Yubico SDK but has not been validated against physical hardware. Looking for early testers with a YubiKey 5 (firmware 5.7.0+) -- [open an issue](https://github.com/ratspeak/ratkey/issues) if you can help.
 
 </div>
 
