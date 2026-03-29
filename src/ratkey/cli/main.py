@@ -1,100 +1,30 @@
 """Ratkey CLI — Hardware identity management for Reticulum.
 
 Entry point: ``rnid-hw`` (installed via pip)
+
+Running ``rnid-hw`` with no arguments launches an interactive wizard.
+All subcommands also work directly for scripting.
 """
 
 from __future__ import annotations
 
 import hashlib
 import random
+import sys
 import time
 from pathlib import Path
 
 import click
 
 
-@click.group()
-@click.version_option(package_name="ratkey")
-def cli():
-    """Ratkey — Hardware-backed identity management for Reticulum.
-
-    Manage Reticulum identities stored on YubiKey 5 hardware security
-    tokens via the PIV smart card interface.
-    """
+DEFAULT_IDENTITY_DIR = str(Path.home() / ".reticulum" / "identities")
 
 
-# ── Provision ────────────────────────────────────────────────────────
+# ── Shared helpers ──────────────────────────────────────────────────
 
 
-@cli.command()
-@click.option("--pin", prompt="PIV PIN", hide_input=True, confirmation_prompt=True,
-              help="6-8 character PIV PIN for the YubiKey")
-@click.option("--method", type=click.Choice(["hardware-only", "recoverable"]),
-              help="Provisioning method (prompted if not provided)")
-@click.option("--touch-signing", type=click.Choice(["never", "cached", "always"]),
-              default="never", show_default=True,
-              help="Touch policy for signing operations")
-@click.option("--touch-encryption", type=click.Choice(["never", "cached", "always"]),
-              default="never", show_default=True,
-              help="Touch policy for decryption operations")
-@click.option("--nickname", "-n", default="", help="Human-readable name for this identity")
-@click.option("--output", "-o", type=click.Path(), required=True,
-              help="Directory to save the .hwid file")
-def provision(pin, method, touch_signing, touch_encryption, nickname, output):
-    """Provision a new hardware-backed Reticulum identity.
-
-    You'll choose between two provisioning methods:
-
-    \b
-    Hardware-only: Keys generated on the YubiKey. No backup possible.
-    Recoverable:   Keys derived from a 24-word seed phrase. Write down
-                   the words as your backup.
-    """
-    if len(pin) < 6 or len(pin) > 8:
-        raise click.BadParameter("PIN must be 6-8 characters", param_hint="--pin")
-
-    # Method selection
-    if method is None:
-        method = _prompt_method()
-
-    if method == "recoverable":
-        _provision_recoverable(pin, touch_signing, touch_encryption, nickname, output)
-    else:
-        _provision_hardware_only(pin, touch_signing, touch_encryption, nickname, output)
-
-
-def _prompt_method() -> str:
-    """Interactive provisioning method selection."""
-    click.echo()
-    click.echo("Choose a provisioning method:")
-    click.echo()
-    click.echo("  [1] Hardware-only")
-    click.echo("      Keys are generated directly on the YubiKey's secure element.")
-    click.echo("      No backup is possible. If you lose this YubiKey, this identity")
-    click.echo("      is gone forever. This is the most secure option.")
-    click.echo()
-    click.echo("  [2] Recoverable (seed phrase)")
-    click.echo("      Keys are derived from a 24-word seed phrase and imported to the")
-    click.echo("      YubiKey. Write down the words as your backup. If you lose the")
-    click.echo("      YubiKey, you can restore the identity to a new one using the words.")
-    click.echo()
-    choice = click.prompt("Choose", type=click.Choice(["1", "2"]))
-    return "hardware-only" if choice == "1" else "recoverable"
-
-
-def _confirm_policies(touch_signing: str, touch_encryption: str) -> bool:
-    """Display policy summary and get confirmation."""
-    click.echo()
-    click.echo("Touch policy summary:")
-    click.echo(f"  Signing:    {touch_signing}")
-    click.echo(f"  Encryption: {touch_encryption}")
-    click.echo()
-    click.echo("WARNING: These policies are permanently burned into the YubiKey's")
-    click.echo("hardware. They CANNOT be changed after provisioning — not by software,")
-    click.echo("not by firmware update, not by factory reset. If you choose wrong,")
-    click.echo("your only option is to generate a new identity (new address, start over).")
-    click.echo()
-    return click.confirm("Proceed with these policies?")
+def _default_dir() -> str:
+    return DEFAULT_IDENTITY_DIR
 
 
 def _get_backend():
@@ -108,7 +38,6 @@ def _get_backend():
 
     try:
         backend = YubiKeyPIVBackend()
-        click.echo("Connected to YubiKey.")
         return backend
     except Exception as e:
         click.echo(f"Error: could not connect to YubiKey — {e}", err=True)
@@ -118,8 +47,41 @@ def _get_backend():
         raise SystemExit(1)
 
 
+def _touch_map():
+    from ratkey.backends.base import TouchPolicy
+    return {"never": TouchPolicy.NEVER, "cached": TouchPolicy.CACHED, "always": TouchPolicy.ALWAYS}
+
+
+def _wipe(data):
+    """Best-effort zeroing of sensitive data in memory.
+
+    Python strings and bytes are immutable so this is not guaranteed —
+    the interpreter may keep copies. This is defense-in-depth.
+    """
+    import ctypes
+    if isinstance(data, bytearray):
+        ctypes.memset(
+            ctypes.addressof((ctypes.c_char * len(data)).from_buffer(data)),
+            0, len(data),
+        )
+    elif isinstance(data, (bytes, str)):
+        # Can't truly zero immutable objects, but we can try to overwrite
+        # the buffer. This works on CPython but is not portable.
+        try:
+            buf = ctypes.cast(id(data) + (sys.getsizeof(data) - len(data)),
+                              ctypes.POINTER(ctypes.c_char * len(data)))
+            ctypes.memset(buf, 0, len(data))
+        except Exception:
+            pass
+
+
+def _pin_policy_map():
+    from ratkey.backends.base import PinPolicy
+    return {"once": PinPolicy.ONCE, "always": PinPolicy.ALWAYS, "never": PinPolicy.NEVER}
+
+
 def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption,
-               output, provisioning_method):
+               pin_policy, output, provisioning_method):
     """Compute identity hash and save .hwid file."""
     pub_bytes = x_pub + ed_pub
     identity_hash = hashlib.sha256(pub_bytes).digest()[:16]
@@ -136,6 +98,7 @@ def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption
         device_firmware="",
         ed25519_pub=ed_pub.hex(),
         x25519_pub=x_pub.hex(),
+        pin_policy=pin_policy,
         touch_signing=touch_signing,
         touch_encryption=touch_encryption,
         provisioning_method=provisioning_method,
@@ -145,7 +108,7 @@ def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption
     save_hwid(config, path)
 
     click.echo()
-    click.echo("Hardware identity provisioned:")
+    click.echo("Done. Hardware identity provisioned:")
     click.echo(f"  Identity hash:  {hash_hex}")
     click.echo(f"  Ed25519 public: {ed_pub.hex()}")
     click.echo(f"  X25519 public:  {x_pub.hex()}")
@@ -154,55 +117,136 @@ def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption
     return hash_hex
 
 
-def _provision_hardware_only(pin, touch_signing, touch_encryption, nickname, output):
+# ── Interactive prompts ─────────────────────────────────────────────
+
+
+def _prompt_pin() -> str:
+    """Prompt for PIV PIN with validation and confirmation."""
+    while True:
+        pin = click.prompt("PIV PIN (6-8 characters)", hide_input=True)
+        if len(pin) < 6 or len(pin) > 8:
+            click.echo("PIN must be 6-8 characters. Try again.")
+            continue
+        confirm = click.prompt("Confirm PIN", hide_input=True)
+        if pin != confirm:
+            click.echo("PINs don't match. Try again.")
+            continue
+        return pin
+
+
+def _prompt_pin_policy() -> str:
+    """Prompt for PIN policy."""
+    click.echo()
+    click.echo("PIN policy:")
+    click.echo()
+    click.echo("  [1] once   — Enter PIN once per session. Cached until you unplug. (recommended)")
+    click.echo("  [2] always — Enter PIN for every single operation.")
+    click.echo("  [3] never  — No PIN required. Anyone with the YubiKey can use it.")
+    click.echo()
+    choice = click.prompt("Choice", type=click.Choice(["1", "2", "3"]), default="1", show_default=True)
+    return {"1": "once", "2": "always", "3": "never"}[choice]
+
+
+def _prompt_touch(operation: str) -> str:
+    """Prompt for touch policy for a given operation."""
+    click.echo()
+    click.echo(f"Touch policy for {operation}:")
+    click.echo()
+    click.echo("  [1] never  — No touch required. Best for messaging and servers.")
+    click.echo("  [2] cached — Touch once, then free for 15 seconds.")
+    click.echo("  [3] always — Touch every single operation. Maximum security.")
+    click.echo()
+    choice = click.prompt("Choice", type=click.Choice(["1", "2", "3"]), default="1", show_default=True)
+    return {"1": "never", "2": "cached", "3": "always"}[choice]
+
+
+def _prompt_nickname() -> str:
+    """Prompt for an optional nickname."""
+    return click.prompt("Nickname (optional, Enter to skip)", default="", show_default=False)
+
+
+def _prompt_output() -> str:
+    """Prompt for output directory with default."""
+    return click.prompt("Save location", default=_default_dir(), show_default=True)
+
+
+def _show_summary(method: str, pin_policy: str, touch_signing: str,
+                  touch_encryption: str, nickname: str, output: str) -> bool:
+    """Show a summary of what's about to happen and confirm."""
+    click.echo()
+    click.echo("─── Summary ───────────────────────────────────────")
+    click.echo(f"  Method:         {method}")
+    click.echo(f"  PIN policy:     {pin_policy}")
+    click.echo(f"  Touch (sign):   {touch_signing}")
+    click.echo(f"  Touch (crypt):  {touch_encryption}")
+    click.echo(f"  Nickname:       {nickname or '(none)'}")
+    click.echo(f"  Output:         {output}")
+    click.echo()
+    click.echo("  Touch and PIN policies are permanently burned into the")
+    click.echo("  YubiKey. They CANNOT be changed after provisioning.")
+    click.echo("───────────────────────────────────────────────────")
+    click.echo()
+    return click.confirm("Proceed?")
+
+
+# ── Flows ───────────────────────────────────────────────────────────
+
+
+def _connect_and_prepare(backend):
+    """Connect to YubiKey, check for existing keys, reset if user agrees.
+
+    Returns True if ready to proceed, False if user cancelled.
+    """
+    slots = backend.check_slots()
+    has_keys = slots["signing"] or slots["encryption"]
+
+    if has_keys:
+        click.echo()
+        occupied = []
+        if slots["signing"]:
+            occupied.append("9A (signing)")
+        if slots["encryption"]:
+            occupied.append("9D (encryption)")
+        click.echo(f"This YubiKey already has keys in slot(s): {', '.join(occupied)}")
+        click.echo("Provisioning will reset the PIV application, clearing ALL existing")
+        click.echo("PIV keys, PIN, and PUK back to factory defaults.")
+        click.echo()
+        if not click.confirm("Reset and overwrite?"):
+            click.echo("Cancelled.")
+            return False
+        backend.reset_piv()
+        click.echo("PIV application reset.")
+    return True
+
+
+def _do_provision_hardware_only(pin, pin_policy, touch_signing, touch_encryption, nickname, output):
     """Provision with keys generated on-device."""
-    if not _confirm_policies(touch_signing, touch_encryption):
-        click.echo("Cancelled.")
+    backend = _get_backend()
+    click.echo("Connected to YubiKey.")
+
+    if not _connect_and_prepare(backend):
         return
 
-    from ratkey.backends.base import TouchPolicy
-    touch_map = {"never": TouchPolicy.NEVER, "cached": TouchPolicy.CACHED, "always": TouchPolicy.ALWAYS}
-
-    backend = _get_backend()
     try:
-        result = backend.provision(pin, touch_map[touch_signing], touch_map[touch_encryption])
+        result = backend.provision(
+            pin, _touch_map()[touch_signing], _touch_map()[touch_encryption],
+            _pin_policy_map()[pin_policy],
+        )
     except Exception as e:
         click.echo(f"Provisioning failed: {e}", err=True)
         raise SystemExit(1)
 
     _save_hwid(result["ed25519_public"], result["x25519_public"],
                backend, nickname, touch_signing, touch_encryption,
-               output, "hardware-only")
+               pin_policy, output, "hardware-only")
 
     click.echo()
     click.echo("WARNING: No backup exists. If you lose this YubiKey, this identity")
     click.echo("is gone forever. There is no recovery.")
 
 
-def _provision_recoverable(pin, touch_signing, touch_encryption, nickname, output):
+def _do_provision_recoverable(pin, pin_policy, touch_signing, touch_encryption, nickname, output):
     """Provision with keys derived from a BIP-39 seed phrase."""
-    click.echo()
-    click.echo("SECURITY NOTICE")
-    click.echo()
-    click.echo("Your private keys will be derived from a 24-word seed phrase and")
-    click.echo("imported to the YubiKey. This means:")
-    click.echo()
-    click.echo("  * The seed phrase IS your identity — anyone who sees these words")
-    click.echo("    can reconstruct your private keys and impersonate you")
-    click.echo("  * The seed phrase is NOT protected by your YubiKey PIN")
-    click.echo("  * The keys briefly exist in this computer's memory during import")
-    click.echo("  * You get recoverability: lose the YubiKey, restore from words")
-    click.echo()
-
-    if not click.confirm("Continue with recoverable provisioning?"):
-        click.echo("Cancelled.")
-        return
-
-    if not _confirm_policies(touch_signing, touch_encryption):
-        click.echo("Cancelled.")
-        return
-
-    # Generate seed phrase
     from ratkey.backup.seed_phrase import generate_mnemonic, derive_keys
 
     mnemonic = generate_mnemonic()
@@ -218,12 +262,12 @@ def _provision_recoverable(pin, touch_signing, touch_encryption, nickname, outpu
     click.echo("WRITE THESE WORDS DOWN NOW on physical paper.")
     click.echo()
     click.echo("  * Do NOT photograph them")
-    click.echo("  * Do NOT store them digitally (no notes apps, no cloud, no screenshots)")
+    click.echo("  * Do NOT store them digitally")
     click.echo("  * Store the paper in a physically secure location")
     click.echo("  * These words will NOT be shown again")
     click.echo()
 
-    # Spot-check: verify user wrote them down
+    # Spot-check
     check_indices = random.sample(range(24), 2)
     for idx in sorted(check_indices):
         answer = click.prompt(f"Confirm — enter word #{idx + 1}").strip().lower()
@@ -233,45 +277,216 @@ def _provision_recoverable(pin, touch_signing, touch_encryption, nickname, outpu
             raise SystemExit(1)
 
     click.echo("Confirmed.")
-    click.echo()
 
-    # Derive keys
     ed_prv, ed_pub, x_prv, x_pub = derive_keys(mnemonic)
 
-    # Import to hardware
-    from ratkey.backends.base import TouchPolicy
-    touch_map = {"never": TouchPolicy.NEVER, "cached": TouchPolicy.CACHED, "always": TouchPolicy.ALWAYS}
-
     backend = _get_backend()
+    click.echo("Connected to YubiKey.")
+
+    if not _connect_and_prepare(backend):
+        _wipe(mnemonic)
+        _wipe(ed_prv)
+        _wipe(x_prv)
+        del mnemonic, words, ed_prv, x_prv
+        return
+
     try:
         result = backend.import_key(
             ed_prv, x_prv, pin,
-            touch_map[touch_signing], touch_map[touch_encryption],
+            _touch_map()[touch_signing], _touch_map()[touch_encryption],
+            _pin_policy_map()[pin_policy],
+        )
+    except Exception as e:
+        click.echo(f"Key import failed: {e}", err=True)
+        _wipe(mnemonic)
+        _wipe(ed_prv)
+        _wipe(x_prv)
+        del mnemonic, words, ed_prv, x_prv
+        raise SystemExit(1)
+
+    # Wipe sensitive material from memory
+    _wipe(mnemonic)
+    _wipe(ed_prv)
+    _wipe(x_prv)
+    for i in range(len(words)):
+        _wipe(words[i])
+    del mnemonic, words, ed_prv, x_prv
+
+    _save_hwid(result["ed25519_public"], result["x25519_public"],
+               backend, nickname, touch_signing, touch_encryption,
+               pin_policy, output, "recoverable")
+
+    click.echo()
+    click.echo("Seed phrase and private keys have been wiped from memory.")
+    click.echo("Close this terminal to clear scrollback history.")
+
+
+def _do_restore(pin_policy, touch_signing, touch_encryption, nickname, output):
+    """Restore from seed phrase flow."""
+    click.echo("Enter your 24-word seed phrase (space-separated):")
+    words_input = click.prompt("Seed phrase").strip()
+
+    from ratkey.backup.seed_phrase import validate_mnemonic, derive_keys, compute_identity_hash
+
+    if not validate_mnemonic(words_input):
+        click.echo("Invalid seed phrase. Must be 24 valid BIP-39 English words.", err=True)
+        raise SystemExit(1)
+
+    ed_prv, ed_pub, x_prv, x_pub = derive_keys(words_input)
+    identity_hash = compute_identity_hash(ed_pub, x_pub)
+    hash_hex = identity_hash.hex()
+
+    click.echo(f"\nDerived identity hash: {hash_hex}")
+    if not click.confirm("Is this the identity you want to restore?"):
+        click.echo("Cancelled.")
+        _wipe(words_input)
+        _wipe(ed_prv)
+        _wipe(x_prv)
+        del words_input, ed_prv, x_prv
+        return
+
+    backend = _get_backend()
+    click.echo("Connected to YubiKey.")
+
+    if not _connect_and_prepare(backend):
+        _wipe(words_input)
+        _wipe(ed_prv)
+        _wipe(x_prv)
+        del words_input, ed_prv, x_prv
+        return
+
+    pin = _prompt_pin()
+
+    try:
+        result = backend.import_key(
+            ed_prv, x_prv, pin,
+            _touch_map()[touch_signing], _touch_map()[touch_encryption],
+            _pin_policy_map()[pin_policy],
+        )
+    except Exception as e:
+        click.echo(f"Key import failed: {e}", err=True)
+        _wipe(words_input)
+        _wipe(ed_prv)
+        _wipe(x_prv)
+        del words_input, ed_prv, x_prv
+        raise SystemExit(1)
+
+    if result["ed25519_public"] != ed_pub or result["x25519_public"] != x_pub:
+        click.echo("ERROR: Imported keys don't match derived keys.", err=True)
+        _wipe(words_input)
+        _wipe(ed_prv)
+        _wipe(x_prv)
+        del words_input, ed_prv, x_prv
+        raise SystemExit(1)
+
+    # Wipe sensitive material
+    _wipe(words_input)
+    _wipe(ed_prv)
+    _wipe(x_prv)
+    del words_input, ed_prv, x_prv
+
+    _save_hwid(ed_pub, x_pub, backend, nickname,
+               touch_signing, touch_encryption, pin_policy, output, "recoverable")
+
+    click.echo()
+    click.echo("Identity restored successfully.")
+    click.echo("Seed phrase and private keys have been wiped from memory.")
+    click.echo("Close this terminal to clear scrollback history.")
+
+
+def _do_migrate(identity_path, pin_policy, touch_signing, touch_encryption, nickname, output):
+    """Migrate a software identity to hardware."""
+    key_data = Path(identity_path).read_bytes()
+
+    # Handle both raw 64-byte format and msgpack-wrapped format
+    if len(key_data) == 64:
+        prv_bytes = key_data
+    else:
+        try:
+            import msgpack
+            unpacked = msgpack.unpackb(key_data)
+            if isinstance(unpacked, dict) and b"private_key" in unpacked:
+                prv_bytes = unpacked[b"private_key"]
+            elif isinstance(unpacked, dict) and "private_key" in unpacked:
+                prv_bytes = unpacked["private_key"]
+            elif isinstance(unpacked, bytes) and len(unpacked) == 64:
+                prv_bytes = unpacked
+            else:
+                prv_bytes = key_data
+        except Exception:
+            prv_bytes = key_data
+
+    if len(prv_bytes) != 64:
+        click.echo(f"Error: identity file must contain 64 bytes of key material, got {len(prv_bytes)}.", err=True)
+        raise SystemExit(1)
+
+    x25519_prv = prv_bytes[:32]
+    ed25519_prv = prv_bytes[32:64]
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    ed_pub = Ed25519PrivateKey.from_private_bytes(ed25519_prv).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    x_pub = X25519PrivateKey.from_private_bytes(x25519_prv).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+    identity_hash = hashlib.sha256(x_pub + ed_pub).digest()[:16]
+    hash_hex = identity_hash.hex()
+
+    click.echo(f"\nIdentity to migrate: {hash_hex}")
+    click.echo(f"  Ed25519 public: {ed_pub.hex()}")
+    click.echo(f"  X25519 public:  {x_pub.hex()}")
+    click.echo()
+
+    if not click.confirm("Is this the identity you want to move to hardware?"):
+        click.echo("Cancelled.")
+        return
+
+    backend = _get_backend()
+    click.echo("Connected to YubiKey.")
+
+    if not _connect_and_prepare(backend):
+        return
+
+    pin = _prompt_pin()
+
+    try:
+        result = backend.import_key(
+            ed25519_prv, x25519_prv, pin,
+            _touch_map()[touch_signing], _touch_map()[touch_encryption],
+            _pin_policy_map()[pin_policy],
         )
     except Exception as e:
         click.echo(f"Key import failed: {e}", err=True)
         raise SystemExit(1)
 
-    _save_hwid(result["ed25519_public"], result["x25519_public"],
-               backend, nickname, touch_signing, touch_encryption,
-               output, "recoverable")
+    if result["ed25519_public"] != ed_pub or result["x25519_public"] != x_pub:
+        click.echo("ERROR: Imported keys don't match source identity.", err=True)
+        raise SystemExit(1)
+
+    _save_hwid(ed_pub, x_pub, backend, nickname,
+               touch_signing, touch_encryption, pin_policy, output, "migrated")
 
     click.echo()
-    click.echo("Close this terminal window after confirming you have your seed phrase written down.")
+    if click.confirm("Delete the software identity file? (Keys now live on the YubiKey)"):
+        Path(identity_path).unlink()
+        click.echo(f"Deleted {identity_path}")
+    else:
+        click.echo(f"Software key file kept at {identity_path}")
+        click.echo("Consider deleting it manually once you've confirmed the hardware identity works.")
 
 
-# ── List ─────────────────────────────────────────────────────────────
+def _do_list(directory):
+    """List hardware identities."""
+    dir_path = Path(directory)
+    if not dir_path.exists():
+        click.echo("No hardware identities have been provisioned yet.")
+        return
 
-
-@cli.command("list")
-@click.option("--dir", "-d", type=click.Path(exists=True), required=True,
-              help="Directory to scan for .hwid files")
-def list_identities(dir):
-    """List hardware identities in a directory."""
     from ratkey.hwid import load_hwid
 
     found = 0
-    for entry in sorted(Path(dir).iterdir()):
+    for entry in sorted(dir_path.iterdir()):
         hwid_path = entry / "identity.hwid"
         if hwid_path.exists():
             try:
@@ -289,84 +504,11 @@ def list_identities(dir):
         click.echo(f"\n{found} hardware identity(s) found.")
 
 
-# ── Info ─────────────────────────────────────────────────────────────
-
-
-@cli.command()
-@click.argument("hwid", type=click.Path(exists=True))
-def info(hwid):
-    """Show detailed hardware identity information."""
+def _do_test(hwid_path):
+    """Test signing and key agreement against hardware."""
     from ratkey.hwid import load_hwid
 
-    config = load_hwid(hwid)
-
-    click.echo("Hardware Identity Information:")
-    click.echo(f"  Hash:            {config.identity_hash}")
-    click.echo(f"  Nickname:        {config.nickname or '(none)'}")
-    click.echo(f"  Created:         {config.created_at} (Unix timestamp)")
-    click.echo()
-    click.echo("Device:")
-    click.echo(f"  Type:            {config.device_type}")
-    click.echo(f"  Serial:          {config.device_serial}")
-    click.echo(f"  Firmware:        {config.device_firmware}")
-    click.echo()
-    click.echo("Keys:")
-    click.echo(f"  Ed25519 public:  {config.ed25519_pub}")
-    click.echo(f"  X25519 public:   {config.x25519_pub}")
-    click.echo()
-    click.echo("Policy (permanent — set at provisioning):")
-    click.echo(f"  Touch (sign):    {config.touch_signing}")
-    click.echo(f"  Touch (encrypt): {config.touch_encryption}")
-    click.echo(f"  PIN cache:       {config.pin_cache_timeout}s (editable in .hwid file)")
-    click.echo()
-    click.echo(f"Provisioning:      {config.provisioning_method or 'unknown'}")
-    if config.attestation_verified:
-        click.echo("Attestation:       verified")
-    else:
-        click.echo("Attestation:       (not verified)")
-
-
-# ── Verify ───────────────────────────────────────────────────────────
-
-
-@cli.command()
-@click.argument("hwid", type=click.Path(exists=True))
-def verify(hwid):
-    """Verify that a connected YubiKey matches a .hwid file."""
-    from ratkey.hwid import load_hwid
-
-    config = load_hwid(hwid)
-    click.echo(f"Verifying identity {config.identity_hash}...")
-
-    try:
-        from ratkey.backends.yubikey_piv import YubiKeyPIVBackend
-        backend = YubiKeyPIVBackend(serial=config.device_serial)
-        ed_pub, x_pub = backend.get_public_keys()
-
-        if ed_pub.hex() == config.ed25519_pub and x_pub.hex() == config.x25519_pub:
-            click.echo("PASS: YubiKey public keys match .hwid file.")
-        else:
-            click.echo("FAIL: Public keys do not match.", err=True)
-            raise SystemExit(1)
-    except ImportError:
-        click.echo("YubiKey backend not installed. Run: pip install ratkey[yubikey]", err=True)
-        raise SystemExit(1)
-    except Exception as e:
-        click.echo(f"Verification failed: {e}", err=True)
-        raise SystemExit(1)
-
-
-# ── Test ─────────────────────────────────────────────────────────────
-
-
-@cli.command()
-@click.argument("hwid", type=click.Path(exists=True))
-@click.option("--pin", prompt="PIV PIN", hide_input=True, help="YubiKey PIV PIN")
-def test(hwid, pin):
-    """Test signing and decryption with a connected YubiKey."""
-    from ratkey.hwid import load_hwid
-
-    config = load_hwid(hwid)
+    config = load_hwid(hwid_path)
     click.echo(f"Testing identity {config.identity_hash}...\n")
 
     try:
@@ -379,6 +521,7 @@ def test(hwid, pin):
         click.echo(f"Cannot connect to YubiKey: {e}", err=True)
         raise SystemExit(1)
 
+    pin = click.prompt("PIV PIN", hide_input=True)
     try:
         backend.verify_pin(pin)
     except Exception as e:
@@ -426,176 +569,368 @@ def test(hwid, pin):
     click.echo("\nAll tests passed.")
 
 
-# ── Restore ──────────────────────────────────────────────────────────
+# ── Interactive wizard ──────────────────────────────────────────────
 
 
-@cli.command()
-@click.option("--output", "-o", type=click.Path(), required=True,
-              help="Directory to save the restored .hwid file")
-@click.option("--touch-signing", type=click.Choice(["never", "cached", "always"]),
-              default="cached", show_default=True)
-@click.option("--touch-encryption", type=click.Choice(["never", "cached", "always"]),
-              default="cached", show_default=True)
-@click.option("--nickname", "-n", default="", help="Nickname for the restored identity")
-def restore(output, touch_signing, touch_encryption, nickname):
-    """Restore an identity from a 24-word seed phrase.
+def _wizard():
+    """Main interactive menu."""
+    click.echo()
+    click.echo("Ratkey — Hardware-backed Reticulum identity management")
+    click.echo()
+    click.echo("  [1] Provision new identity")
+    click.echo("  [2] Restore identity from seed phrase")
+    click.echo("  [3] Migrate software identity to hardware")
+    click.echo("  [4] Test a hardware identity")
+    click.echo("  [5] List hardware identities")
+    click.echo("  [6] Exit")
+    click.echo()
+    choice = click.prompt("Choose", type=click.Choice(["1", "2", "3", "4", "5", "6"]))
 
-    Enter the seed phrase you wrote down during provisioning. The same
-    keys will be derived and imported onto the connected YubiKey.
-    """
-    click.echo("Enter your 24-word seed phrase (space-separated):")
-    words_input = click.prompt("Seed phrase").strip()
+    if choice == "1":
+        _wizard_provision()
+    elif choice == "2":
+        _wizard_restore()
+    elif choice == "3":
+        _wizard_migrate()
+    elif choice == "4":
+        _wizard_test()
+    elif choice == "5":
+        _do_list(_default_dir())
+    else:
+        return
 
-    from ratkey.backup.seed_phrase import validate_mnemonic, derive_keys, compute_identity_hash
 
-    if not validate_mnemonic(words_input):
-        click.echo("Invalid seed phrase. Must be 24 valid BIP-39 English words.", err=True)
-        raise SystemExit(1)
+def _wizard_provision():
+    """Interactive provisioning walkthrough."""
+    click.echo()
+    click.echo("─── Provision New Identity ─────────────────────────")
+    click.echo()
+    click.echo("Choose a provisioning method:")
+    click.echo()
+    click.echo("  [1] Hardware-only")
+    click.echo("      Keys generated on the YubiKey's secure element.")
+    click.echo("      No backup possible. Lose the key, lose the identity.")
+    click.echo()
+    click.echo("  [2] Recoverable (seed phrase)")
+    click.echo("      Keys derived from a 24-word seed phrase.")
+    click.echo("      Write down the words — that's your backup.")
+    click.echo()
+    method_choice = click.prompt("Method", type=click.Choice(["1", "2"]))
+    method = "hardware-only" if method_choice == "1" else "recoverable"
 
-    # Derive keys and show expected identity
-    ed_prv, ed_pub, x_prv, x_pub = derive_keys(words_input)
-    identity_hash = compute_identity_hash(ed_pub, x_pub)
-    hash_hex = identity_hash.hex()
+    if method == "recoverable":
+        click.echo()
+        click.echo("SECURITY NOTICE: Your keys will be derived from a seed phrase and")
+        click.echo("imported to the YubiKey. The seed phrase IS your identity — anyone")
+        click.echo("who sees those words can reconstruct your keys. The keys briefly")
+        click.echo("exist in host memory during import.")
+        click.echo()
+        if not click.confirm("Continue with recoverable provisioning?"):
+            click.echo("Cancelled.")
+            return
 
-    click.echo(f"\nDerived identity hash: {hash_hex}")
-    if not click.confirm("Is this the identity you want to restore?"):
+    click.echo()
+    pin = _prompt_pin()
+    pin_policy = _prompt_pin_policy()
+    touch_signing = _prompt_touch("signing (Ed25519, slot 9A)")
+    touch_encryption = _prompt_touch("encryption (X25519, slot 9D)")
+    click.echo()
+    nickname = _prompt_nickname()
+    output = _prompt_output()
+
+    if not _show_summary(method, pin_policy, touch_signing, touch_encryption, nickname, output):
         click.echo("Cancelled.")
         return
 
-    pin = click.prompt("PIV PIN for the target YubiKey", hide_input=True)
-    if len(pin) < 6 or len(pin) > 8:
-        click.echo("PIN must be 6-8 characters.", err=True)
-        raise SystemExit(1)
-
-    from ratkey.backends.base import TouchPolicy
-    touch_map = {"never": TouchPolicy.NEVER, "cached": TouchPolicy.CACHED, "always": TouchPolicy.ALWAYS}
-
-    backend = _get_backend()
-    try:
-        result = backend.import_key(
-            ed_prv, x_prv, pin,
-            touch_map[touch_signing], touch_map[touch_encryption],
-        )
-    except Exception as e:
-        click.echo(f"Key import failed: {e}", err=True)
-        raise SystemExit(1)
-
-    # Verify the imported keys match
-    if result["ed25519_public"] != ed_pub or result["x25519_public"] != x_pub:
-        click.echo("ERROR: Imported keys don't match derived keys.", err=True)
-        raise SystemExit(1)
-
-    _save_hwid(ed_pub, x_pub, backend, nickname,
-               touch_signing, touch_encryption, output, "recoverable")
-
-    click.echo("\nIdentity restored successfully.")
+    if method == "recoverable":
+        _do_provision_recoverable(pin, pin_policy, touch_signing, touch_encryption, nickname, output)
+    else:
+        _do_provision_hardware_only(pin, pin_policy, touch_signing, touch_encryption, nickname, output)
 
 
-# ── Migrate ──────────────────────────────────────────────────────────
+def _wizard_restore():
+    """Interactive restore walkthrough."""
+    click.echo()
+    click.echo("─── Restore Identity from Seed Phrase ──────────────")
+    click.echo()
+
+    pin_policy = _prompt_pin_policy()
+    touch_signing = _prompt_touch("signing (Ed25519, slot 9A)")
+    touch_encryption = _prompt_touch("encryption (X25519, slot 9D)")
+    click.echo()
+    nickname = _prompt_nickname()
+    output = _prompt_output()
+
+    click.echo()
+    _do_restore(pin_policy, touch_signing, touch_encryption, nickname, output)
+
+
+def _wizard_migrate():
+    """Interactive migrate walkthrough."""
+    click.echo()
+    click.echo("─── Migrate Software Identity to Hardware ──────────")
+    click.echo()
+
+    identity_path = click.prompt("Path to Reticulum identity file",
+                                 type=click.Path(exists=True))
+
+    pin_policy = _prompt_pin_policy()
+    touch_signing = _prompt_touch("signing (Ed25519, slot 9A)")
+    touch_encryption = _prompt_touch("encryption (X25519, slot 9D)")
+    click.echo()
+    nickname = _prompt_nickname()
+    output = _prompt_output()
+
+    click.echo()
+    _do_migrate(identity_path, pin_policy, touch_signing, touch_encryption, nickname, output)
+
+
+def _wizard_test():
+    """Interactive test walkthrough."""
+    click.echo()
+    click.echo("─── Test Hardware Identity ─────────────────────────")
+    click.echo()
+
+    # Auto-discover identities
+    id_dir = Path(_default_dir())
+    hwid_files = []
+    if id_dir.exists():
+        for entry in sorted(id_dir.iterdir()):
+            hwid_path = entry / "identity.hwid"
+            if hwid_path.exists():
+                hwid_files.append(hwid_path)
+
+    if not hwid_files:
+        path = click.prompt("Path to .hwid file", type=click.Path(exists=True))
+        _do_test(path)
+        return
+
+    click.echo("Found identities:")
+    click.echo()
+    from ratkey.hwid import load_hwid
+    for i, path in enumerate(hwid_files, 1):
+        try:
+            config = load_hwid(path)
+            nick = config.nickname or "(unnamed)"
+            click.echo(f"  [{i}] {config.identity_hash[:16]}...  {nick}")
+        except Exception:
+            click.echo(f"  [{i}] {path}")
+
+    click.echo()
+    choice = click.prompt("Choose identity", type=click.IntRange(1, len(hwid_files)))
+    _do_test(str(hwid_files[choice - 1]))
+
+
+# ── CLI group + subcommands ─────────────────────────────────────────
+
+
+@click.group(invoke_without_command=True)
+@click.version_option(package_name="ratkey")
+@click.pass_context
+def cli(ctx):
+    """Ratkey — Hardware-backed identity management for Reticulum.
+
+    Run with no arguments for an interactive setup wizard.
+    """
+    if ctx.invoked_subcommand is None:
+        _wizard()
+
+
+# Subcommands below are kept for scripting / direct invocation.
+
+
+@cli.command()
+@click.option("--pin", default=None, help="6-8 character PIV PIN for the YubiKey")
+@click.option("--method", type=click.Choice(["hardware-only", "recoverable"]),
+              default=None, help="Provisioning method")
+@click.option("--pin-policy", type=click.Choice(["once", "always", "never"]),
+              default=None, help="PIN policy (once, always, never)")
+@click.option("--touch-signing", type=click.Choice(["never", "cached", "always"]),
+              default=None, help="Touch policy for signing")
+@click.option("--touch-encryption", type=click.Choice(["never", "cached", "always"]),
+              default=None, help="Touch policy for encryption")
+@click.option("--nickname", "-n", default=None, help="Human-readable name")
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="Save directory [default: ~/.reticulum/identities]")
+def provision(pin, method, pin_policy, touch_signing, touch_encryption, nickname, output):
+    """Provision a new hardware-backed Reticulum identity.
+
+    All options are prompted interactively if not provided.
+    """
+    # Prompt for anything not supplied via CLI
+    if method is None:
+        click.echo()
+        click.echo("Choose a provisioning method:")
+        click.echo()
+        click.echo("  [1] Hardware-only — keys generated on YubiKey, no backup")
+        click.echo("  [2] Recoverable  — keys from seed phrase, write down as backup")
+        click.echo()
+        c = click.prompt("Method", type=click.Choice(["1", "2"]))
+        method = "hardware-only" if c == "1" else "recoverable"
+
+    if method == "recoverable":
+        click.echo()
+        click.echo("SECURITY NOTICE: Keys derived from a seed phrase and imported.")
+        click.echo("The seed phrase IS your identity. Keys briefly exist in host memory.")
+        click.echo()
+        if not click.confirm("Continue?"):
+            click.echo("Cancelled.")
+            return
+
+    if pin is None:
+        pin = _prompt_pin()
+    elif len(pin) < 6 or len(pin) > 8:
+        raise click.BadParameter("PIN must be 6-8 characters", param_hint="--pin")
+
+    if pin_policy is None:
+        pin_policy = _prompt_pin_policy()
+    if touch_signing is None:
+        touch_signing = _prompt_touch("signing (Ed25519, slot 9A)")
+    if touch_encryption is None:
+        touch_encryption = _prompt_touch("encryption (X25519, slot 9D)")
+    if nickname is None:
+        nickname = _prompt_nickname()
+    if output is None:
+        output = _prompt_output()
+
+    if not _show_summary(method, pin_policy, touch_signing, touch_encryption, nickname, output):
+        click.echo("Cancelled.")
+        return
+
+    if method == "recoverable":
+        _do_provision_recoverable(pin, pin_policy, touch_signing, touch_encryption, nickname, output)
+    else:
+        _do_provision_hardware_only(pin, pin_policy, touch_signing, touch_encryption, nickname, output)
+
+
+@cli.command()
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="Save directory [default: ~/.reticulum/identities]")
+@click.option("--pin-policy", type=click.Choice(["once", "always", "never"]),
+              default=None, help="PIN policy (once, always, never)")
+@click.option("--touch-signing", type=click.Choice(["never", "cached", "always"]),
+              default=None, help="Touch policy for signing")
+@click.option("--touch-encryption", type=click.Choice(["never", "cached", "always"]),
+              default=None, help="Touch policy for encryption")
+@click.option("--nickname", "-n", default=None, help="Nickname for the restored identity")
+def restore(output, pin_policy, touch_signing, touch_encryption, nickname):
+    """Restore an identity from a 24-word seed phrase."""
+    if pin_policy is None:
+        pin_policy = _prompt_pin_policy()
+    if touch_signing is None:
+        touch_signing = _prompt_touch("signing (Ed25519, slot 9A)")
+    if touch_encryption is None:
+        touch_encryption = _prompt_touch("encryption (X25519, slot 9D)")
+    if nickname is None:
+        nickname = _prompt_nickname()
+    if output is None:
+        output = _prompt_output()
+
+    _do_restore(pin_policy, touch_signing, touch_encryption, nickname, output)
 
 
 @cli.command()
 @click.argument("identity", type=click.Path(exists=True))
-@click.option("--output", "-o", type=click.Path(), required=True,
-              help="Directory to save the .hwid file")
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="Save directory [default: ~/.reticulum/identities]")
+@click.option("--pin-policy", type=click.Choice(["once", "always", "never"]),
+              default=None, help="PIN policy (once, always, never)")
 @click.option("--touch-signing", type=click.Choice(["never", "cached", "always"]),
-              default="cached", show_default=True)
+              default=None, help="Touch policy for signing")
 @click.option("--touch-encryption", type=click.Choice(["never", "cached", "always"]),
-              default="cached", show_default=True)
-@click.option("--nickname", "-n", default="", help="Nickname for the migrated identity")
-def migrate(identity, output, touch_signing, touch_encryption, nickname):
-    """Move an existing software identity onto a YubiKey.
+              default=None, help="Touch policy for encryption")
+@click.option("--nickname", "-n", default=None, help="Nickname for the migrated identity")
+def migrate(identity, output, pin_policy, touch_signing, touch_encryption, nickname):
+    """Move an existing software identity onto a YubiKey."""
+    if pin_policy is None:
+        pin_policy = _prompt_pin_policy()
+    if touch_signing is None:
+        touch_signing = _prompt_touch("signing (Ed25519, slot 9A)")
+    if touch_encryption is None:
+        touch_encryption = _prompt_touch("encryption (X25519, slot 9D)")
+    if nickname is None:
+        nickname = _prompt_nickname()
+    if output is None:
+        output = _prompt_output()
 
-    Reads a Reticulum identity file (64-byte private key), imports the
-    keys onto the connected YubiKey, and writes a .hwid config file.
-    Same identity, same address -- now hardware-backed.
-    """
-    # Read the identity file
-    key_data = Path(identity).read_bytes()
+    _do_migrate(identity, pin_policy, touch_signing, touch_encryption, nickname, output)
 
-    # Handle both raw 64-byte format and msgpack-wrapped format
-    if len(key_data) == 64:
-        prv_bytes = key_data
-    else:
-        try:
-            import rmp_serde
-        except ImportError:
-            pass
-        # Try msgpack unwrap (ratspeak format: {"private_key": bytes})
-        try:
-            import msgpack
-            unpacked = msgpack.unpackb(key_data)
-            if isinstance(unpacked, dict) and b"private_key" in unpacked:
-                prv_bytes = unpacked[b"private_key"]
-            elif isinstance(unpacked, dict) and "private_key" in unpacked:
-                prv_bytes = unpacked["private_key"]
-            elif isinstance(unpacked, bytes) and len(unpacked) == 64:
-                prv_bytes = unpacked
-            else:
-                prv_bytes = key_data
-        except Exception:
-            prv_bytes = key_data
 
-    if len(prv_bytes) != 64:
-        click.echo(f"Error: identity file must contain 64 bytes of key material, got {len(prv_bytes)}.", err=True)
-        raise SystemExit(1)
+@cli.command("list")
+@click.option("--dir", "-d", type=click.Path(), default=None,
+              help="Directory to scan [default: ~/.reticulum/identities]")
+def list_identities(dir):
+    """List hardware identities."""
+    _do_list(dir or _default_dir())
 
-    x25519_prv = prv_bytes[:32]
-    ed25519_prv = prv_bytes[32:64]
 
-    # Compute and display the identity hash so user can confirm
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+@cli.command()
+@click.argument("hwid", type=click.Path(exists=True))
+def info(hwid):
+    """Show detailed hardware identity information."""
+    from ratkey.hwid import load_hwid
 
-    ed_pub = Ed25519PrivateKey.from_private_bytes(ed25519_prv).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    x_pub = X25519PrivateKey.from_private_bytes(x25519_prv).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    config = load_hwid(hwid)
 
-    identity_hash = hashlib.sha256(x_pub + ed_pub).digest()[:16]
-    hash_hex = identity_hash.hex()
-
-    click.echo(f"\nIdentity to migrate: {hash_hex}")
-    click.echo(f"  Ed25519 public: {ed_pub.hex()}")
-    click.echo(f"  X25519 public:  {x_pub.hex()}")
+    click.echo("Hardware Identity Information:")
+    click.echo(f"  Hash:            {config.identity_hash}")
+    click.echo(f"  Nickname:        {config.nickname or '(none)'}")
+    click.echo(f"  Created:         {config.created_at} (Unix timestamp)")
     click.echo()
+    click.echo("Device:")
+    click.echo(f"  Type:            {config.device_type}")
+    click.echo(f"  Serial:          {config.device_serial}")
+    click.echo(f"  Firmware:        {config.device_firmware}")
+    click.echo()
+    click.echo("Keys:")
+    click.echo(f"  Ed25519 public:  {config.ed25519_pub}")
+    click.echo(f"  X25519 public:   {config.x25519_pub}")
+    click.echo()
+    click.echo("Policy (permanent — set at provisioning):")
+    click.echo(f"  PIN policy:      {config.pin_policy}")
+    click.echo(f"  Touch (sign):    {config.touch_signing}")
+    click.echo(f"  Touch (encrypt): {config.touch_encryption}")
+    click.echo(f"  PIN cache:       {config.pin_cache_timeout}s (editable in .hwid file)")
+    click.echo()
+    click.echo(f"Provisioning:      {config.provisioning_method or 'unknown'}")
+    if config.attestation_verified:
+        click.echo("Attestation:       verified")
+    else:
+        click.echo("Attestation:       (not verified)")
 
-    if not click.confirm("Is this the identity you want to move to hardware?"):
-        click.echo("Cancelled.")
-        return
 
-    pin = click.prompt("PIV PIN for the YubiKey", hide_input=True)
-    if len(pin) < 6 or len(pin) > 8:
-        click.echo("PIN must be 6-8 characters.", err=True)
-        raise SystemExit(1)
+@cli.command()
+@click.argument("hwid", type=click.Path(exists=True))
+def verify(hwid):
+    """Verify that a connected YubiKey matches a .hwid file."""
+    from ratkey.hwid import load_hwid
 
-    from ratkey.backends.base import TouchPolicy
-    touch_map = {"never": TouchPolicy.NEVER, "cached": TouchPolicy.CACHED, "always": TouchPolicy.ALWAYS}
+    config = load_hwid(hwid)
+    click.echo(f"Verifying identity {config.identity_hash}...")
 
-    backend = _get_backend()
     try:
-        result = backend.import_key(
-            ed25519_prv, x25519_prv, pin,
-            touch_map[touch_signing], touch_map[touch_encryption],
-        )
+        from ratkey.backends.yubikey_piv import YubiKeyPIVBackend
+        backend = YubiKeyPIVBackend(serial=config.device_serial)
+        ed_pub, x_pub = backend.get_public_keys()
+
+        if ed_pub.hex() == config.ed25519_pub and x_pub.hex() == config.x25519_pub:
+            click.echo("PASS: YubiKey public keys match .hwid file.")
+        else:
+            click.echo("FAIL: Public keys do not match.", err=True)
+            raise SystemExit(1)
+    except ImportError:
+        click.echo("YubiKey backend not installed. Run: pip install ratkey[yubikey]", err=True)
+        raise SystemExit(1)
     except Exception as e:
-        click.echo(f"Key import failed: {e}", err=True)
+        click.echo(f"Verification failed: {e}", err=True)
         raise SystemExit(1)
 
-    # Verify
-    if result["ed25519_public"] != ed_pub or result["x25519_public"] != x_pub:
-        click.echo("ERROR: Imported keys don't match source identity.", err=True)
-        raise SystemExit(1)
 
-    _save_hwid(ed_pub, x_pub, backend, nickname,
-               touch_signing, touch_encryption, output, "migrated")
-
-    click.echo()
-    if click.confirm("Delete the software identity file? (Keys now live on the YubiKey)"):
-        Path(identity).unlink()
-        click.echo(f"Deleted {identity}")
-    else:
-        click.echo(f"Software key file kept at {identity}")
-        click.echo("Consider deleting it manually once you've confirmed the hardware identity works.")
+@cli.command()
+@click.argument("hwid", type=click.Path(exists=True))
+def test(hwid):
+    """Test signing and decryption with a connected YubiKey."""
+    _do_test(hwid)
 
 
 if __name__ == "__main__":

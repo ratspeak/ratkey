@@ -15,6 +15,14 @@ class TouchPolicy(Enum):
     CACHED = "cached"
 
 
+class PinPolicy(Enum):
+    """PIN policy for a PIV slot."""
+
+    ONCE = "once"
+    ALWAYS = "always"
+    NEVER = "never"
+
+
 class AbstractHardwareBackend(ABC):
     """Base class for hardware identity backends (YubiKey, Nitrokey, Mock).
 
@@ -40,6 +48,7 @@ class AbstractHardwareBackend(ABC):
         pin: str,
         touch_signing: TouchPolicy = TouchPolicy.ALWAYS,
         touch_encryption: TouchPolicy = TouchPolicy.CACHED,
+        pin_policy: PinPolicy = PinPolicy.ONCE,
     ) -> dict:
         """Generate a new identity keypair on the hardware device.
 
@@ -86,6 +95,7 @@ class AbstractHardwareBackend(ABC):
         pin: str,
         touch_signing: TouchPolicy = TouchPolicy.ALWAYS,
         touch_encryption: TouchPolicy = TouchPolicy.CACHED,
+        pin_policy: PinPolicy = PinPolicy.ONCE,
     ) -> dict:
         """Import existing key material onto the device.
 

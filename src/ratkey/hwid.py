@@ -50,6 +50,7 @@ class HwidConfig:
     encryption_slot: str = "9D"
 
     # Policy
+    pin_policy: str = "once"
     pin_cache_timeout: int = 300
     touch_signing: str = "always"
     touch_encryption: str = "cached"
@@ -123,6 +124,7 @@ def load_hwid(path: str | Path) -> HwidConfig:
     # Policy section
     if "policy" in data:
         sec = data["policy"]
+        config.pin_policy = sec.get("pin_policy", "once")
         config.pin_cache_timeout = sec.get("pin_cache_timeout", 300)
         config.touch_signing = sec.get("touch_signing", "always")
         config.touch_encryption = sec.get("touch_encryption", "cached")
@@ -177,6 +179,7 @@ def save_hwid(config: HwidConfig, path: str | Path) -> None:
             "encryption": config.encryption_slot,
         },
         "policy": {
+            "pin_policy": config.pin_policy,
             "pin_cache_timeout": config.pin_cache_timeout,
             "touch_signing": config.touch_signing,
             "touch_encryption": config.touch_encryption,

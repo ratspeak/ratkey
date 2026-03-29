@@ -37,8 +37,10 @@ Requires Python 3.9+, the `rns` package, and a YubiKey 5 with firmware 5.7.0 or 
 Plug in your YubiKey and run:
 
 ```
-rnid-hw provision
+rnid-hw
 ```
+
+An interactive wizard walks you through everything: provisioning method, PIN, PIN policy, touch policies, and where to save the identity file. You can also jump straight to a specific action with `rnid-hw provision`, `rnid-hw restore`, etc.
 
 You pick a PIN (6-8 characters, 3 wrong attempts locks it) and choose one of the following two provisioning methods:
 
@@ -86,7 +88,7 @@ If the YubiKey is unplugged mid-session, operations that need it will block unti
 
 ## PIV slot usage
 
-The tool writes to PIV slots 9A (Authentication, used for Ed25519 signing) and 9D (Key Management, used for X25519 encryption). If you already have keys in those slots, SSH login, S/MIME, or anything else, provisioning will warn you and refuse to overwrite. Pass `--force` if you know what you're doing, but understand that whatever was in those slots is now gone.
+The tool writes to PIV slots 9A (Authentication, used for Ed25519 signing) and 9D (Key Management, used for X25519 encryption). If you already have keys in those slots — SSH login, S/MIME, or anything else — provisioning will detect them and ask if you want to reset the PIV application. Resetting clears all existing PIV keys and resets the PIN/PUK to factory defaults before proceeding.
 
 ## Security model
 
@@ -97,14 +99,17 @@ Does not protect against physical YubiKey theft (PIN and lockout help, but aren'
 ## CLI
 
 ```
+rnid-hw                        Interactive wizard (start here)
 rnid-hw provision              Provision a new hardware identity
-rnid-hw migrate <identity>     Move an existing software identity onto a YubiKey
 rnid-hw restore                Restore an identity from a 24-word seed phrase
-rnid-hw list -d <directory>    List hardware identities in a directory
+rnid-hw migrate <identity>     Move an existing software identity onto a YubiKey
+rnid-hw list                   List hardware identities
 rnid-hw info <hwid-file>       Show detailed identity information
 rnid-hw verify <hwid-file>     Check that a connected YubiKey matches a .hwid file
 rnid-hw test <hwid-file>       Run signing and decryption tests against hardware
 ```
+
+All commands prompt interactively for any options not provided via flags. Identities are saved to `~/.reticulum/identities/` by default.
 
 ## For developers
 
