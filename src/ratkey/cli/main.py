@@ -27,6 +27,17 @@ def _default_dir() -> str:
     return DEFAULT_IDENTITY_DIR
 
 
+def _compute_lxmf_hash(identity_hash: bytes) -> bytes:
+    """Compute the LXMF delivery destination hash from an identity hash.
+
+    This mirrors Reticulum's Destination.hash(identity, "lxmf", "delivery"):
+      name_hash = SHA-256("lxmf.delivery")[:10]
+      dest_hash = SHA-256(name_hash + identity_hash)[:16]
+    """
+    name_hash = hashlib.sha256(b"lxmf.delivery").digest()[:10]
+    return hashlib.sha256(name_hash + identity_hash).digest()[:16]
+
+
 def _get_backend():
     """Connect to a YubiKey hardware backend."""
     try:
@@ -86,6 +97,8 @@ def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption
     pub_bytes = x_pub + ed_pub
     identity_hash = hashlib.sha256(pub_bytes).digest()[:16]
     hash_hex = identity_hash.hex()
+    lxmf_hash = _compute_lxmf_hash(identity_hash)
+    lxmf_hex = lxmf_hash.hex()
 
     from ratkey.hwid import HwidConfig, save_hwid
 
@@ -101,6 +114,7 @@ def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption
         pin_policy=pin_policy,
         touch_signing=touch_signing,
         touch_encryption=touch_encryption,
+        lxmf_hash=lxmf_hex,
         provisioning_method=provisioning_method,
     )
 
@@ -109,11 +123,16 @@ def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption
 
     click.echo()
     click.echo("Done. Hardware identity provisioned:")
+    click.echo()
+    click.echo(f"  LXMF address:   {lxmf_hex}")
     click.echo(f"  Identity hash:  {hash_hex}")
     click.echo(f"  Ed25519 public: {ed_pub.hex()}")
     click.echo(f"  X25519 public:  {x_pub.hex()}")
     click.echo(f"  Method:         {provisioning_method}")
     click.echo(f"  Saved to:       {path}")
+    click.echo()
+    click.echo("  Your LXMF address is what you share with others")
+    click.echo("  so they can message you.")
     return hash_hex
 
 
@@ -335,9 +354,12 @@ def _do_restore(pin_policy, touch_signing, touch_encryption, nickname, output):
     ed_prv, ed_pub, x_prv, x_pub = derive_keys(words_input)
     identity_hash = compute_identity_hash(ed_pub, x_pub)
     hash_hex = identity_hash.hex()
+    lxmf_hex = _compute_lxmf_hash(identity_hash).hex()
 
-    click.echo(f"\nDerived identity hash: {hash_hex}")
-    if not click.confirm("Is this the identity you want to restore?"):
+    click.echo(f"\nDerived identity:")
+    click.echo(f"  LXMF address:   {lxmf_hex}")
+    click.echo(f"  Identity hash:  {hash_hex}")
+    if not click.confirm("\nIs this the identity you want to restore?"):
         click.echo("Cancelled.")
         _wipe(words_input)
         _wipe(ed_prv)
@@ -432,8 +454,11 @@ def _do_migrate(identity_path, pin_policy, touch_signing, touch_encryption, nick
 
     identity_hash = hashlib.sha256(x_pub + ed_pub).digest()[:16]
     hash_hex = identity_hash.hex()
+    lxmf_hex = _compute_lxmf_hash(identity_hash).hex()
 
-    click.echo(f"\nIdentity to migrate: {hash_hex}")
+    click.echo(f"\nIdentity to migrate:")
+    click.echo(f"  LXMF address:   {lxmf_hex}")
+    click.echo(f"  Identity hash:  {hash_hex}")
     click.echo(f"  Ed25519 public: {ed_pub.hex()}")
     click.echo(f"  X25519 public:  {x_pub.hex()}")
     click.echo()
@@ -493,7 +518,8 @@ def _do_list(directory):
                 config = load_hwid(hwid_path)
                 nick = config.nickname or "(unnamed)"
                 method = config.provisioning_method or "unknown"
-                click.echo(f"  {config.identity_hash}  {config.device_type}  {method}  {nick}")
+                lxmf_hex = config.lxmf_hash or _compute_lxmf_hash(bytes.fromhex(config.identity_hash)).hex()
+                click.echo(f"  LXMF: {lxmf_hex}  Identity: {config.identity_hash}  {config.device_type}  {method}  {nick}")
                 found += 1
             except Exception as e:
                 click.echo(f"  Error reading {hwid_path}: {e}", err=True)
