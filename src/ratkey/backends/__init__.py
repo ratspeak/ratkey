@@ -21,7 +21,7 @@ def auto_detect_backend(
     """
     device_type = config.device_type.lower()
 
-    if device_type == "yubikey5":
+    if device_type in ("yubikey5", "yubikey"):
         try:
             from ratkey.backends.yubikey_piv import YubiKeyPIVBackend
 

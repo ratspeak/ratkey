@@ -323,5 +323,15 @@ class YubiKeyPIVBackend(AbstractHardwareBackend):
 
     def get_public_keys(self) -> tuple[bytes, bytes]:
         if self._ed25519_pub is None or self._x25519_pub is None:
-            raise PINRequiredError("Keys not yet read from device")
+            self._read_public_keys_from_device()
         return (self._ed25519_pub, self._x25519_pub)
+
+    def _read_public_keys_from_device(self):
+        """Read existing public keys from PIV slots 9A and 9D."""
+        from yubikit.piv import SLOT
+
+        self._ensure_session()
+        ed_meta = self._session.get_slot_metadata(SLOT.AUTHENTICATION)
+        x_meta = self._session.get_slot_metadata(SLOT.KEY_MANAGEMENT)
+        self._ed25519_pub = ed_meta.public_key.public_bytes_raw()
+        self._x25519_pub = x_meta.public_key.public_bytes_raw()

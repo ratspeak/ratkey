@@ -145,7 +145,7 @@ If the YubiKey isn't plugged in during a private key operation, a `HardwareDisco
 
 **Touch timeout.** If the YubiKey blinks and you don't tap within ~30 seconds, the operation times out. Just try again.
 
-**Slot conflict during provisioning.** If slots 9A or 9D already contain keys, provisioning refuses to overwrite. Use `--force` if you want to replace them, or use a dedicated YubiKey.
+**Slot conflict during provisioning.** If slots 9A or 9D already contain keys, provisioning will detect them and offer to reset the PIV application before proceeding.
 
 ## License
 

@@ -92,7 +92,7 @@ def _pin_policy_map():
 
 
 def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption,
-               pin_policy, output, provisioning_method):
+               pin_policy, output, provisioning_method, result=None):
     """Compute identity hash and save .hwid file."""
     pub_bytes = x_pub + ed_pub
     identity_hash = hashlib.sha256(pub_bytes).digest()[:16]
@@ -106,9 +106,9 @@ def _save_hwid(ed_pub, x_pub, backend, nickname, touch_signing, touch_encryption
         identity_hash=hash_hex,
         nickname=nickname,
         created_at=int(time.time()),
-        device_type=backend.name.replace("-piv", ""),
-        device_serial=0,
-        device_firmware="",
+        device_type="yubikey5",
+        device_serial=result.get("serial", 0) if result else 0,
+        device_firmware=result.get("firmware", "") if result else "",
         ed25519_pub=ed_pub.hex(),
         x25519_pub=x_pub.hex(),
         pin_policy=pin_policy,
@@ -257,7 +257,7 @@ def _do_provision_hardware_only(pin, pin_policy, touch_signing, touch_encryption
 
     _save_hwid(result["ed25519_public"], result["x25519_public"],
                backend, nickname, touch_signing, touch_encryption,
-               pin_policy, output, "hardware-only")
+               pin_policy, output, "hardware-only", result)
 
     click.echo()
     click.echo("WARNING: No backup exists. If you lose this YubiKey, this identity")
@@ -333,7 +333,7 @@ def _do_provision_recoverable(pin, pin_policy, touch_signing, touch_encryption, 
 
     _save_hwid(result["ed25519_public"], result["x25519_public"],
                backend, nickname, touch_signing, touch_encryption,
-               pin_policy, output, "recoverable")
+               pin_policy, output, "recoverable", result)
 
     click.echo()
     click.echo("Seed phrase and private keys have been wiped from memory.")
@@ -408,7 +408,7 @@ def _do_restore(pin_policy, touch_signing, touch_encryption, nickname, output):
     del words_input, ed_prv, x_prv
 
     _save_hwid(ed_pub, x_pub, backend, nickname,
-               touch_signing, touch_encryption, pin_policy, output, "recoverable")
+               touch_signing, touch_encryption, pin_policy, output, "recoverable", result)
 
     click.echo()
     click.echo("Identity restored successfully.")
@@ -490,7 +490,7 @@ def _do_migrate(identity_path, pin_policy, touch_signing, touch_encryption, nick
         raise SystemExit(1)
 
     _save_hwid(ed_pub, x_pub, backend, nickname,
-               touch_signing, touch_encryption, pin_policy, output, "migrated")
+               touch_signing, touch_encryption, pin_policy, output, "migrated", result)
 
     click.echo()
     if click.confirm("Delete the software identity file? (Keys now live on the YubiKey)"):
@@ -898,7 +898,10 @@ def info(hwid):
 
     config = load_hwid(hwid)
 
+    lxmf_hex = config.lxmf_hash or _compute_lxmf_hash(bytes.fromhex(config.identity_hash)).hex()
+
     click.echo("Hardware Identity Information:")
+    click.echo(f"  LXMF address:    {lxmf_hex}")
     click.echo(f"  Hash:            {config.identity_hash}")
     click.echo(f"  Nickname:        {config.nickname or '(none)'}")
     click.echo(f"  Created:         {config.created_at} (Unix timestamp)")
